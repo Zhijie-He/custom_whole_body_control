@@ -34,6 +34,8 @@ parser.add_argument(
     help="Use the pre-trained checkpoint from Nucleus.",
 )
 parser.add_argument("--real-time", action="store_true", default=False, help="Run in real-time, if possible.")
+parser.add_argument("--registry_name", type=str, required=True, help="The name of the wand registry.")
+
 # append RSL-RL cli arguments
 cli_args.add_rsl_rl_args(parser)
 # append AppLauncher cli args
@@ -118,6 +120,19 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
     log_root_path = os.path.join("logs", "rsl_rl", agent_cfg.experiment_name)
     log_root_path = os.path.abspath(log_root_path)
     print(f"[INFO] Loading experiment from directory: {log_root_path}")
+
+    # load the motion file from the wandb registry
+    registry_name = args_cli.registry_name
+    if ":" not in registry_name:  # Check if the registry name includes alias, if not, append ":latest"
+        registry_name += ":latest"
+    import pathlib
+
+    import wandb
+
+    api = wandb.Api()
+    artifact = api.artifact(registry_name)
+    env_cfg.commands.motion.motion_file = str(pathlib.Path(artifact.download()) / "motion.npz")
+
     if args_cli.use_pretrained_checkpoint:
         resume_path = get_published_pretrained_checkpoint("rsl_rl", train_task_name)
         if not resume_path:
@@ -201,31 +216,112 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
     # reset environment
     obs = env.get_observations()
     timestep = 0
+
+    # draw error png
+    import numpy as np
+    import matplotlib.pyplot as plt
+    command = env.unwrapped.command_manager.get_term("motion")
+
+    ref_history = []
+    actual_history = []
+    error_history = []
+
+    plt.ion()
+    fig, (ax_xy, ax_error) = plt.subplots(1, 2, figsize=(11, 4))
+
+    ref_line, = ax_xy.plot([], [], label="Reference")
+    actual_line, = ax_xy.plot([], [], label="Robot")
+    ax_xy.set_xlabel("World X (m)")
+    ax_xy.set_ylabel("World Y (m)")
+    ax_xy.set_title("Anchor XY trajectory")
+    ax_xy.set_aspect("equal", adjustable="datalim")
+    ax_xy.grid(True)
+    ax_xy.legend()
+
+    error_line, = ax_error.plot([], [], label="XY error")
+    ax_error.set_xlabel("Episode elapsed time (s)")
+    ax_error.set_ylabel("Error (m)")
+    ax_error.grid(True)
+    ax_error.legend()
+
+    fig.tight_layout()
+    plt.show(block=False)
+
+    plot_counter = 0
+    clear_before_record = False
+
     # simulate environment
     while simulation_app.is_running():
         start_time = time.time()
         # run everything in inference mode
         with torch.inference_mode():
+            if clear_before_record:
+                ref_history.clear()
+                actual_history.clear()
+                error_history.clear()
+                clear_before_record = False
+
+            frame_before = int(command.time_steps[0].item())
+
+            ref = command.anchor_pos_w[0, :2].cpu().numpy().copy()
+            actual = command.robot_anchor_pos_w[0, :2].cpu().numpy().copy()
+            ref_history.append(ref)
+            actual_history.append(actual)
+            error_history.append(float(np.linalg.norm(ref - actual)))
+
             # agent stepping
             actions = policy(obs)
             # env stepping
             obs, _, dones, _ = env.step(actions)
+
+            frame_after = int(command.time_steps[0].item())
+            clear_before_record = (
+                bool(dones[0].item())
+                or frame_after != frame_before + 1
+            )
+
             # reset recurrent states for episodes that have terminated
             if version.parse(installed_version) >= version.parse("4.0.0"):
                 policy.reset(dones)
             else:
                 policy_nn.reset(dones)
+
+        plot_counter += 1
+
+        # 每 5 个控制步刷新一次，减少绘图开销
+        if plot_counter % 5 == 0 or clear_before_record:
+            refs = np.asarray(ref_history)
+            actuals = np.asarray(actual_history)
+            times = np.arange(len(error_history)) * dt
+
+            ref_line.set_data(refs[:, 0], refs[:, 1])
+            actual_line.set_data(actuals[:, 0], actuals[:, 1])
+            error_line.set_data(times, error_history)
+
+            ax_error.set_title(
+                f"XY error: {error_history[-1]:.3f} m"
+                f" | frame: {frame_before}"
+            )
+
+            for ax in (ax_xy, ax_error):
+                ax.relim()
+                ax.autoscale_view()
+
+            fig.canvas.draw_idle()
+            plt.pause(0.001)
+
         if args_cli.video:
             timestep += 1
             # Exit the play loop after recording one video
             if timestep == args_cli.video_length:
                 break
-
+        
         # time delay for real-time evaluation
         sleep_time = dt - (time.time() - start_time)
         if args_cli.real_time and sleep_time > 0:
             time.sleep(sleep_time)
 
+    plt.close(fig)
     # close the simulator
     env.close()
 
@@ -235,3 +331,5 @@ if __name__ == "__main__":
     main()
     # close sim app
     simulation_app.close()
+
+
