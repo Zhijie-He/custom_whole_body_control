@@ -34,7 +34,10 @@ parser.add_argument("--export_io_descriptors", action="store_true", default=Fals
 parser.add_argument(
     "--ray-proc-id", "-rid", type=int, default=None, help="Automatically configured by Ray integration, otherwise None."
 )
-parser.add_argument("--registry_name", type=str, required=True, help="The name of the wand registry.")
+
+motion_input = parser.add_mutually_exclusive_group(required=True)
+motion_input.add_argument("--registry_name", type=str, help="The name of the wand registry.")
+motion_input.add_argument("--motion_dir", type=str, help="The path of training motion folder.")
 
 # append RSL-RL cli arguments
 cli_args.add_rsl_rl_args(parser)
@@ -106,6 +109,7 @@ from isaaclab_tasks.utils.hydra import hydra_task_config
 logger = logging.getLogger(__name__)
 
 import custom_whole_body_control.tasks  # noqa: F401
+from custom_whole_body_control.utils.my_on_policy_runner import MotionOnPolicyRunner as OnPolicyRunner
 
 torch.backends.cuda.matmul.allow_tf32 = True
 torch.backends.cudnn.allow_tf32 = True
@@ -147,17 +151,21 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
         env_cfg.seed = seed
         agent_cfg.seed = seed
 
-    # load the motion file from the wandb registry
-    registry_name = args_cli.registry_name
-    if ":" not in registry_name:  # Check if the registry name includes alias, if not, append ":latest"
-        registry_name += ":latest"
-    import pathlib
+    registry_name = None
+    if args_cli.motion_dir is not None:
+        env_cfg.commands.motion.motion_dir = args_cli.motion_dir
+    else:
+        # load the motion file from the wandb registry
+        registry_name = args_cli.registry_name
+        if ":" not in registry_name:  # Check if the registry name includes alias, if not, append ":latest"
+            registry_name += ":latest"
+            
+        import pathlib
+        import wandb
 
-    import wandb
-
-    api = wandb.Api()
-    artifact = api.artifact(registry_name)
-    env_cfg.commands.motion.motion_file = str(pathlib.Path(artifact.download()) / "motion.npz")
+        api = wandb.Api()
+        artifact = api.artifact(registry_name)
+        env_cfg.commands.motion.motion_file = str(pathlib.Path(artifact.download()) / "motion.npz")
 
     # specify directory for logging experiments
     log_root_path = os.path.join("logs", "rsl_rl", agent_cfg.experiment_name)

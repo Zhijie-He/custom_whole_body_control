@@ -34,7 +34,9 @@ parser.add_argument(
     help="Use the pre-trained checkpoint from Nucleus.",
 )
 parser.add_argument("--real-time", action="store_true", default=False, help="Run in real-time, if possible.")
-parser.add_argument("--registry_name", type=str, required=True, help="The name of the wand registry.")
+input_group = parser.add_mutually_exclusive_group(required=True)
+input_group.add_argument("--motion_file", type=str, help="The path to the input motion csv file.")
+input_group.add_argument("--registry_name", type=str, help="The name of the wand registry.")
 
 # append RSL-RL cli arguments
 cli_args.add_rsl_rl_args(parser)
@@ -121,17 +123,20 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
     log_root_path = os.path.abspath(log_root_path)
     print(f"[INFO] Loading experiment from directory: {log_root_path}")
 
-    # load the motion file from the wandb registry
-    registry_name = args_cli.registry_name
-    if ":" not in registry_name:  # Check if the registry name includes alias, if not, append ":latest"
-        registry_name += ":latest"
-    import pathlib
-
-    import wandb
-
-    api = wandb.Api()
-    artifact = api.artifact(registry_name)
-    env_cfg.commands.motion.motion_file = str(pathlib.Path(artifact.download()) / "motion.npz")
+    motion_file = None
+    if args_cli.motion_file is not None:
+        motion_file = args_cli.motion_file
+    else:
+        registry_name = args_cli.registry_name
+        if ":" not in registry_name:  # Check if the registry name includes alias, if not, append ":latest"
+            registry_name += ":latest"
+        import pathlib
+        import wandb
+        api = wandb.Api()
+        artifact = api.artifact(registry_name)
+        motion_file = str(pathlib.Path(artifact.download()) / "motion.npz")
+        
+    env_cfg.commands.motion.motion_file = str(motion_file)
 
     if args_cli.use_pretrained_checkpoint:
         resume_path = get_published_pretrained_checkpoint("rsl_rl", train_task_name)
